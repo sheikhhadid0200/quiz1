@@ -1,11 +1,13 @@
 import hmac
 import logging
 import os
+import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
 import httpx
 from dotenv import load_dotenv
@@ -20,8 +22,9 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OPERATOR_CHAT_ID = os.getenv("OPERATOR_CHAT_ID", "")
 OPERATOR_CALLBACK_SECRET = os.getenv("OPERATOR_CALLBACK_SECRET", "")
+DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+DB_PATH = DATA_DIR / "app.sqlite3"
 SESSION_TTL_SECONDS = 24 * 60 * 60
 app = FastAPI(title="Operator Review")
 
@@ -34,6 +37,19 @@ class Session:
 
 
 sessions: dict[str, Session] = {}
+
+
+@contextmanager
+def database_connection() -> Iterator[sqlite3.Connection]:
+    connection = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def remove_expired_sessions() -> None:
@@ -58,6 +74,54 @@ class Submission(BaseModel):
 class OperatorAction(BaseModel):
     session_id: str
     action: Literal["success", "quiz_next", "error"]
+    user_id: int = Field(gt=0)
+    chat_id: int = Field(gt=0)
+
+
+class OperatorRegistration(BaseModel):
+    user_id: int = Field(gt=0)
+    chat_id: int = Field(gt=0)
+
+
+def initialize_database() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with database_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operators (
+                user_id INTEGER PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                registered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+
+def get_operator_chat_ids() -> list[int]:
+    with database_connection() as connection:
+        rows = connection.execute(
+            "SELECT chat_id FROM operators ORDER BY registered_at, user_id"
+        ).fetchall()
+    return [int(row[0]) for row in rows]
+
+
+def is_registered_operator(user_id: int, chat_id: int) -> bool:
+    with database_connection() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM operators WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id),
+        ).fetchone()
+    return row is not None
+
+
+def require_operator_secret(secret: str) -> None:
+    if not OPERATOR_CALLBACK_SECRET or not hmac.compare_digest(
+        secret, OPERATOR_CALLBACK_SECRET
+    ):
+        raise HTTPException(status_code=401, detail="Invalid operator credential")
+
+
+initialize_database()
 
 
 def require_configuration() -> None:
@@ -65,7 +129,6 @@ def require_configuration() -> None:
         name
         for name, value in (
             ("BOT_TOKEN", BOT_TOKEN),
-            ("OPERATOR_CHAT_ID", OPERATOR_CHAT_ID),
             ("OPERATOR_CALLBACK_SECRET", OPERATOR_CALLBACK_SECRET),
         )
         if not value
@@ -87,10 +150,40 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/operators/register", status_code=201)
+async def register_operator(
+    payload: OperatorRegistration,
+    x_operator_secret: str = Header(default=""),
+) -> dict[str, str]:
+    require_operator_secret(x_operator_secret)
+    with database_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO operators (user_id, chat_id)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                chat_id = excluded.chat_id,
+                registered_at = CURRENT_TIMESTAMP
+            """,
+            (payload.user_id, payload.chat_id),
+        )
+    return {"status": "registered"}
+
+
 @app.post("/api/submissions", status_code=201)
 async def create_submission(submission: Submission) -> dict[str, str]:
     require_configuration()
     remove_expired_sessions()
+    operator_chat_ids = get_operator_chat_ids()
+    if not operator_chat_ids:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Пока нет зарегистрированных операторов. Сначала каждый "
+                "оператор должен открыть бота и отправить ему /start."
+            ),
+        )
+
     session_id = str(uuid.uuid4())
     sessions[session_id] = Session()
     failure_detail = "Не удалось передать заявку оператору. Попробуйте позже."
@@ -128,47 +221,52 @@ async def create_submission(submission: Submission) -> dict[str, str]:
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": OPERATOR_CHAT_ID,
-                    "text": message,
-                    "reply_markup": keyboard,
-                },
-            )
-            try:
-                telegram_response = response.json()
-            except ValueError:
-                logger.warning(
-                    "Telegram sendMessage returned invalid JSON (HTTP %s)",
-                    response.status_code,
+            delivered = 0
+            for chat_id in operator_chat_ids:
+                response = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": message,
+                        "reply_markup": keyboard,
+                    },
                 )
-                raise RuntimeError("Telegram returned an invalid response")
-            if not isinstance(telegram_response, dict):
-                telegram_response = {}
-            if not response.is_success or not telegram_response.get("ok"):
-                description = telegram_response.get("description", "no description")
-                if isinstance(description, str) and BOT_TOKEN:
-                    description = description.replace(BOT_TOKEN, "[redacted]")
+                try:
+                    telegram_response = response.json()
+                except ValueError:
+                    telegram_response = {}
+                if (
+                    response.is_success
+                    and isinstance(telegram_response, dict)
+                    and telegram_response.get("ok")
+                ):
+                    delivered += 1
+                    continue
+
+                description = (
+                    telegram_response.get("description", "no description")
+                    if isinstance(telegram_response, dict)
+                    else "invalid response"
+                )
                 logger.warning(
-                    "Telegram sendMessage rejected the request: HTTP %s, "
-                    "error_code=%s, description=%s",
+                    "Telegram rejected delivery to a registered operator: "
+                    "HTTP %s, error_code=%s, description=%s",
                     response.status_code,
-                    telegram_response.get("error_code", "unknown"),
+                    telegram_response.get("error_code", "unknown")
+                    if isinstance(telegram_response, dict)
+                    else "unknown",
                     description,
                 )
-                if (
-                    response.status_code == 403
-                    and isinstance(description, str)
-                    and "can't send messages to the bot" in description.lower()
-                ):
-                    failure_detail = (
-                        "Указан неверный чат оператора: бот не может отправить "
-                        "сообщение другому боту. Напишите этому боту команду "
-                        "/start в личном чате и укажите ID своего чата в "
-                        "OPERATOR_CHAT_ID."
-                    )
-                raise RuntimeError("Telegram rejected the message")
+
+        if delivered == 0:
+            sessions.pop(session_id, None)
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Telegram не доставил заявку ни одному оператору. "
+                    "Попросите операторов открыть бота и отправить /start."
+                ),
+            )
     except httpx.HTTPError as error:
         sessions.pop(session_id, None)
         logger.warning(
@@ -176,12 +274,6 @@ async def create_submission(submission: Submission) -> dict[str, str]:
             session_id,
             type(error).__name__,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=failure_detail,
-        )
-    except RuntimeError:
-        sessions.pop(session_id, None)
         raise HTTPException(
             status_code=502,
             detail=failure_detail,
@@ -196,10 +288,9 @@ async def operator_action(
     x_operator_secret: str = Header(default=""),
 ) -> dict[str, str]:
     remove_expired_sessions()
-    if not OPERATOR_CALLBACK_SECRET or not hmac.compare_digest(
-        x_operator_secret, OPERATOR_CALLBACK_SECRET
-    ):
-        raise HTTPException(status_code=401, detail="Invalid operator credential")
+    require_operator_secret(x_operator_secret)
+    if not is_registered_operator(payload.user_id, payload.chat_id):
+        raise HTTPException(status_code=403, detail="Operator is not registered")
 
     session = sessions.get(payload.session_id)
     if session is None:

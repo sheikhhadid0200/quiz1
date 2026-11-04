@@ -10,8 +10,11 @@ services:
     <<: *app
     environment:
       PORT: "8000"
+      DATA_DIR: /data
     ports:
       - "${HOST_PORT:-8000}:8000"
+    volumes:
+      - app_data:/data
     healthcheck:
       test:
         - CMD
@@ -31,3 +34,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+volumes:
+  app_data:
