@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Проверка заявки</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #172033;
+        background: #f3f5f9;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      main {
+        width: min(100%, 480px);
+        padding: 32px;
+        border-radius: 16px;
+        background: #fff;
+        box-shadow: 0 12px 40px rgb(23 32 51 / 10%);
+      }
+
+      h1 { margin-top: 0; font-size: 1.5rem; }
+
+      form { display: grid; gap: 18px; }
+
+      label { display: grid; gap: 7px; font-weight: 600; }
+
+      input {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid #c9cfdb;
+        border-radius: 8px;
+        font: inherit;
+      }
+
+      button {
+        min-height: 44px;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 8px;
+        background: #2457d6;
+        color: white;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:focus-visible, input:focus-visible {
+        outline: 3px solid #90abff;
+        outline-offset: 2px;
+      }
+
+      [hidden] { display: none !important; }
+
+      .error { color: #a62020; }
+      .result { text-align: center; }
+
+      dialog {
+        width: min(calc(100% - 32px), 440px);
+        padding: 30px;
+        border: 0;
+        border-radius: 16px;
+        text-align: center;
+        box-shadow: 0 18px 60px rgb(0 0 0 / 24%);
+      }
+
+      dialog::backdrop { background: rgb(12 18 32 / 68%); }
+
+      .spinner {
+        width: 42px;
+        height: 42px;
+        margin: 0 auto 18px;
+        border: 4px solid #dce4f7;
+        border-top-color: #2457d6;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .spinner { animation-duration: 2s; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section id="form-screen">
+        <h1>Проверка заявки</h1>
+        <form id="submission-form">
+          <label>
+            Введите свой ник
+            <input name="client_nickname" type="text" maxlength="100" required>
+          </label>
+          <label>
+            Введите новый идентификатор
+            <input name="new_identifier" type="text" maxlength="200" required>
+          </label>
+          <label>
+            Введите какая дата сегодня
+            <input name="current_date" type="text" maxlength="100" required>
+          </label>
+          <label>
+            Введите любимое число
+            <input name="favorite_number" type="number" min="0" max="999999999" step="1" required>
+          </label>
+          <p>После отправки указанные данные будут переданы оператору для проверки.</p>
+          <button id="submit-button" type="submit">Отправить на проверку</button>
+          <p id="form-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section id="success-screen" class="result" hidden>
+        <h1>Заявка проверена</h1>
+        <p>Проверка успешно завершена.</p>
+      </section>
+
+      <section id="quiz-screen" class="result" hidden>
+        <h1>Дополнительный опрос</h1>
+        <p>Вопросы для дополнительного опроса будут добавлены позже.</p>
+      </section>
+
+      <section id="error-screen" class="result" hidden>
+        <h1>Заявка отклонена</h1>
+        <p>Не удалось подтвердить заявку. Проверьте данные и попробуйте ещё раз.</p>
+        <button id="back-button" type="button">Вернуться к первому шагу</button>
+      </section>
+    </main>
+
+    <dialog id="loading-dialog" aria-labelledby="loading-message">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loading-message" aria-live="polite">
+        Пожалуйста, подождите. Ваша заявка обрабатывается оператором системы...
+      </p>
+      <p id="connection-status"></p>
+    </dialog>
+
+    <script>
+      const form = document.querySelector("#submission-form");
+      const formScreen = document.querySelector("#form-screen");
+      const loadingDialog = document.querySelector("#loading-dialog");
+      const connectionStatus = document.querySelector("#connection-status");
+      const formError = document.querySelector("#form-error");
+      const screens = {
+        success: document.querySelector("#success-screen"),
+        quiz_next: document.querySelector("#quiz-screen"),
+        error: document.querySelector("#error-screen"),
+      };
+      let socket;
+      let reconnectTimer;
+      let reconnectDelay = 500;
+      let activeSessionId;
+
+      function connectToSession(sessionId) {
+        activeSessionId = sessionId;
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        socket = new WebSocket(`${protocol}//${location.host}/ws/${encodeURIComponent(sessionId)}`);
+
+        socket.addEventListener("open", () => {
+          reconnectDelay = 500;
+          connectionStatus.textContent = "";
+        });
+        socket.addEventListener("message", (event) => {
+          let packet;
+          try {
+            packet = JSON.parse(event.data);
+          } catch {
+            connectionStatus.textContent = "Получен некорректный ответ сервера.";
+            return;
+          }
+          if (packet.action === "change_screen" && screens[packet.target]) {
+            clearTimeout(reconnectTimer);
+            activeSessionId = null;
+            sessionStorage.removeItem("pendingSessionId");
+            socket.close();
+            loadingDialog.close();
+            Object.values(screens).forEach((screen) => { screen.hidden = true; });
+            screens[packet.target].hidden = false;
+          }
+        });
+        socket.addEventListener("close", (event) => {
+          if (!activeSessionId) return;
+          if (event.code === 1008) {
+            activeSessionId = null;
+            sessionStorage.removeItem("pendingSessionId");
+            loadingDialog.close();
+            formScreen.hidden = false;
+            formError.textContent = "Сессия не найдена. Отправьте заявку повторно.";
+            formError.hidden = false;
+            document.querySelector("#submit-button").disabled = false;
+            return;
+          }
+          connectionStatus.textContent = "Восстанавливаем соединение...";
+          reconnectTimer = setTimeout(() => {
+            reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+            connectToSession(activeSessionId);
+          }, reconnectDelay);
+        });
+        socket.addEventListener("error", () => socket.close());
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        formError.hidden = true;
+        const values = Object.fromEntries(new FormData(form));
+        values.favorite_number = Number(values.favorite_number);
+        const button = document.querySelector("#submit-button");
+        button.disabled = true;
+        formScreen.hidden = true;
+        loadingDialog.showModal();
+
+        try {
+          const response = await fetch("/api/submissions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(values),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || "Не удалось отправить заявку.");
+
+          sessionStorage.setItem("pendingSessionId", result.session_id);
+          connectToSession(result.session_id);
+        } catch (error) {
+          loadingDialog.close();
+          formScreen.hidden = false;
+          formError.textContent = error.message || "Ошибка соединения с сервером.";
+          formError.hidden = false;
+          button.disabled = false;
+        }
+      });
+
+      document.querySelector("#back-button").addEventListener("click", () => {
+        activeSessionId = null;
+        clearTimeout(reconnectTimer);
+        if (socket) socket.close();
+        sessionStorage.removeItem("pendingSessionId");
+        Object.values(screens).forEach((screen) => { screen.hidden = true; });
+        formScreen.hidden = false;
+        form.reset();
+      });
+
+      const pendingSessionId = sessionStorage.getItem("pendingSessionId");
+      if (pendingSessionId) {
+        formScreen.hidden = true;
+        loadingDialog.showModal();
+        connectToSession(pendingSessionId);
+      }
+    </script>
+  </body>
+</html>
