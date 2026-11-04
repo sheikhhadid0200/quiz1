@@ -62,18 +62,21 @@ async def register_operator(message: Message) -> None:
     )
 
 
-@dispatcher.callback_query(F.data.startswith("op_screen:"))
-async def choose_screen(callback: CallbackQuery) -> None:
+@dispatcher.callback_query(F.data.startswith("tutor:"))
+async def send_tutor_feedback(callback: CallbackQuery) -> None:
     if callback.message is None or callback.message.chat.type != "private":
         await callback.answer("Недостаточно прав.", show_alert=True)
         return
 
     try:
-        _, action, session_id = (callback.data or "").split(":", maxsplit=2)
-    except ValueError:
+        _, action, session_id, answer_version = (
+            callback.data or ""
+        ).split(":", maxsplit=3)
+        version = int(answer_version)
+    except (ValueError, TypeError):
         await callback.answer("Некорректное действие.", show_alert=True)
         return
-    if action not in {"comment_demo", "push_demo", "error", "success"}:
+    if action not in {"correct", "hint", "retry", "explain", "finish"}:
         await callback.answer("Неизвестный экран.", show_alert=True)
         return
 
@@ -84,13 +87,16 @@ async def choose_screen(callback: CallbackQuery) -> None:
                 json={
                     "session_id": session_id,
                     "action": action,
+                    "answer_version": version,
                     "user_id": callback.from_user.id,
                     "chat_id": callback.message.chat.id,
                 },
                 headers={"X-Operator-Secret": OPERATOR_CALLBACK_SECRET},
             )
         if response.status_code == 409:
-            await callback.answer("Для этой заявки решение уже принято.", show_alert=True)
+            await callback.answer(
+                "Ответ уже проверен или поступил новый ответ.", show_alert=True
+            )
             return
         response.raise_for_status()
     except httpx.HTTPError:
@@ -98,7 +104,7 @@ async def choose_screen(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось обновить страницу клиента.", show_alert=True)
         return
 
-    await callback.answer("Экран клиента обновлён.")
+    await callback.answer("Обратная связь отправлена ученику.")
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
 

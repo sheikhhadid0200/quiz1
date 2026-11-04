@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Проверка заявки</title>
+    <title>Тест с репетитором</title>
     <style>
       :root {
         color-scheme: light;
@@ -42,6 +42,15 @@
         border: 1px solid #c9cfdb;
         border-radius: 8px;
         font: inherit;
+      }
+
+      textarea {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid #c9cfdb;
+        border-radius: 8px;
+        font: inherit;
+        resize: vertical;
       }
 
       button {
@@ -95,80 +104,55 @@
   </head>
   <body>
     <main>
-      <section id="form-screen">
-        <h1>Проверка заявки</h1>
-        <form id="submission-form">
+      <section id="quiz-screen">
+        <h1>Задание по математике</h1>
+        <p id="question">Сколько будет 7 × 8?</p>
+        <form id="answer-form">
           <label>
-            Введите свой ник
-            <input name="client_nickname" type="text" maxlength="100" required>
+            Твой ответ
+            <input name="answer" type="text" maxlength="200" autocomplete="off" required>
           </label>
-          <label>
-            Введите новый идентификатор
-            <input name="new_identifier" type="text" maxlength="200" required>
-          </label>
-          <label>
-            Введите какая дата сегодня
-            <input name="current_date" type="text" maxlength="100" required>
-          </label>
-          <label>
-            Введите любимое число
-            <input name="favorite_number" type="number" min="0" max="999999999" step="1" required>
-          </label>
-          <p>После отправки указанные данные будут переданы оператору для проверки.</p>
-          <button id="submit-button" type="submit">Отправить на проверку</button>
-          <p id="form-error" class="error" role="alert" hidden></p>
+          <button id="answer-button" type="submit">Отправить репетитору</button>
+          <p id="answer-error" class="error" role="alert" hidden></p>
         </form>
       </section>
 
-      <section id="success-screen" class="result" hidden>
-        <h1>Заявка проверена</h1>
-        <p>Проверка успешно завершена.</p>
+      <section id="feedback-screen" class="result" hidden>
+        <h1 id="feedback-title">Обратная связь</h1>
+        <p id="feedback-message" aria-live="polite"></p>
+        <button id="continue-button" type="button">Ответить ещё раз</button>
       </section>
 
-      <section id="comment-screen" hidden>
-        <h1>Комментарий</h1>
-        <p>Не вводите пароли, коды подтверждения и другие секретные данные.</p>
-        <form id="comment-form">
-          <label>
-            Ваш комментарий
-            <textarea name="comment" rows="5" maxlength="500"></textarea>
-          </label>
-          <button type="submit">Сохранить на этой странице</button>
-          <p id="comment-status" role="status" hidden></p>
-        </form>
-      </section>
-
-      <section id="push-screen" class="result" hidden>
-        <h1>Пуш</h1>
-        <p>Демонстрационный экран push-уведомления. Запрос подтверждения не отправляется.</p>
-      </section>
-
-      <section id="error-screen" class="result" hidden>
-        <h1>Заявка отклонена</h1>
-        <p>Не удалось подтвердить заявку. Проверьте данные и попробуйте ещё раз.</p>
-        <button id="back-button" type="button">Вернуться к первому шагу</button>
+      <section id="complete-screen" class="result" hidden>
+        <h1 id="complete-title">Урок завершён</h1>
+        <p id="complete-message"></p>
       </section>
     </main>
 
     <dialog id="loading-dialog" aria-labelledby="loading-message">
       <div class="spinner" aria-hidden="true"></div>
       <p id="loading-message" aria-live="polite">
-        Пожалуйста, подождите. Ваша заявка обрабатывается оператором системы...
+        Подождите, репетитор проверяет ваш ответ...
       </p>
       <p id="connection-status"></p>
     </dialog>
 
     <script>
-      const form = document.querySelector("#submission-form");
-      const formScreen = document.querySelector("#form-screen");
+      const answerForm = document.querySelector("#answer-form");
+      const quizScreen = document.querySelector("#quiz-screen");
       const loadingDialog = document.querySelector("#loading-dialog");
       const connectionStatus = document.querySelector("#connection-status");
-      const formError = document.querySelector("#form-error");
       const screens = {
-        comment_demo: document.querySelector("#comment-screen"),
-        push_demo: document.querySelector("#push-screen"),
-        success: document.querySelector("#success-screen"),
-        error: document.querySelector("#error-screen"),
+        hint: document.querySelector("#feedback-screen"),
+        retry: document.querySelector("#feedback-screen"),
+        explain: document.querySelector("#feedback-screen"),
+        correct: document.querySelector("#complete-screen"),
+        finish: document.querySelector("#complete-screen"),
+      };
+      const feedbackTitles = {
+        hint: "Подсказка",
+        retry: "Попробуй ещё раз",
+        explain: "Объяснение",
       };
       let socket;
       let reconnectTimer;
@@ -177,6 +161,8 @@
 
       function connectToSession(sessionId) {
         activeSessionId = sessionId;
+        if (socket && (socket.readyState === WebSocket.OPEN
+          || socket.readyState === WebSocket.CONNECTING)) return;
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         socket = new WebSocket(`${protocol}//${location.host}/ws/${encodeURIComponent(sessionId)}`);
 
@@ -194,12 +180,27 @@
           }
           if (packet.action === "change_screen" && screens[packet.target]) {
             clearTimeout(reconnectTimer);
+            loadingDialog.close();
+            if (["hint", "retry", "explain"].includes(packet.target)) {
+              document.querySelector("#feedback-title").textContent =
+                feedbackTitles[packet.target];
+              document.querySelector("#feedback-message").textContent =
+                packet.feedback || "";
+              quizScreen.hidden = true;
+              screens[packet.target].hidden = false;
+              return;
+            }
+
             activeSessionId = null;
             sessionStorage.removeItem("pendingSessionId");
             socket.close();
-            loadingDialog.close();
-            Object.values(screens).forEach((screen) => { screen.hidden = true; });
-            screens[packet.target].hidden = false;
+            quizScreen.hidden = true;
+            document.querySelector("#feedback-screen").hidden = true;
+            document.querySelector("#complete-screen").hidden = false;
+            document.querySelector("#complete-title").textContent =
+              packet.target === "correct" ? "Ответ верный!" : "Урок завершён";
+            document.querySelector("#complete-message").textContent =
+              packet.feedback || "";
           }
         });
         socket.addEventListener("close", (event) => {
@@ -208,10 +209,11 @@
             activeSessionId = null;
             sessionStorage.removeItem("pendingSessionId");
             loadingDialog.close();
-            formScreen.hidden = false;
-            formError.textContent = "Сессия не найдена. Отправьте заявку повторно.";
-            formError.hidden = false;
-            document.querySelector("#submit-button").disabled = false;
+            quizScreen.hidden = false;
+            const answerError = document.querySelector("#answer-error");
+            answerError.textContent = "Урок не найден. Начните тест заново.";
+            answerError.hidden = false;
+            document.querySelector("#answer-button").disabled = false;
             return;
           }
           connectionStatus.textContent = "Восстанавливаем соединение...";
@@ -223,57 +225,56 @@
         socket.addEventListener("error", () => socket.close());
       }
 
-      form.addEventListener("submit", async (event) => {
+      answerForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        formError.hidden = true;
-        const values = Object.fromEntries(new FormData(form));
-        values.favorite_number = Number(values.favorite_number);
-        const button = document.querySelector("#submit-button");
+        const answerError = document.querySelector("#answer-error");
+        answerError.hidden = true;
+        const answer = new FormData(answerForm).get("answer").trim();
+        const button = document.querySelector("#answer-button");
+        if (!answer) return;
         button.disabled = true;
-        formScreen.hidden = true;
+        quizScreen.hidden = true;
         loadingDialog.showModal();
 
         try {
-          const response = await fetch("/api/submissions", {
+          const isFollowUp = Boolean(activeSessionId);
+          const response = await fetch(isFollowUp
+            ? `/api/sessions/${encodeURIComponent(activeSessionId)}/answers`
+            : "/api/submissions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(values),
+            body: JSON.stringify({ answer }),
           });
           const result = await response.json();
-          if (!response.ok) throw new Error(result.detail || "Не удалось отправить заявку.");
+          if (!response.ok) {
+            throw new Error(result.detail || "Не удалось отправить ответ.");
+          }
 
-          sessionStorage.setItem("pendingSessionId", result.session_id);
-          connectToSession(result.session_id);
+          answerForm.reset();
+          if (!isFollowUp) {
+            activeSessionId = result.session_id;
+            sessionStorage.setItem("pendingSessionId", result.session_id);
+          }
+          connectToSession(activeSessionId);
         } catch (error) {
           loadingDialog.close();
-          formScreen.hidden = false;
-          formError.textContent = error.message || "Ошибка соединения с сервером.";
-          formError.hidden = false;
+          quizScreen.hidden = false;
+          answerError.textContent = error.message || "Ошибка соединения с сервером.";
+          answerError.hidden = false;
           button.disabled = false;
         }
       });
 
-      document.querySelector("#comment-form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        const status = document.querySelector("#comment-status");
-        status.textContent = "Комментарий остался в браузере и не отправлен оператору.";
-        status.hidden = false;
-        event.currentTarget.reset();
-      });
-
-      document.querySelector("#back-button").addEventListener("click", () => {
-        activeSessionId = null;
-        clearTimeout(reconnectTimer);
-        if (socket) socket.close();
-        sessionStorage.removeItem("pendingSessionId");
-        Object.values(screens).forEach((screen) => { screen.hidden = true; });
-        formScreen.hidden = false;
-        form.reset();
+      document.querySelector("#continue-button").addEventListener("click", () => {
+        document.querySelector("#feedback-screen").hidden = true;
+        quizScreen.hidden = false;
+        document.querySelector("#answer-button").disabled = false;
+        answerForm.querySelector("[name=answer]").focus();
       });
 
       const pendingSessionId = sessionStorage.getItem("pendingSessionId");
       if (pendingSessionId) {
-        formScreen.hidden = true;
+        quizScreen.hidden = true;
         loadingDialog.showModal();
         connectToSession(pendingSessionId);
       }

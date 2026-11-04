@@ -31,12 +31,23 @@ app = FastAPI(title="Operator Review")
 
 @dataclass
 class Session:
-    action: str | None = None
     websocket: WebSocket | None = None
     created_at: float = field(default_factory=time.monotonic)
+    answer_version: int = 1
+    reviewed_version: int = 0
+    finalized: bool = False
+    latest_event: dict[str, str] | None = None
 
 
 sessions: dict[str, Session] = {}
+QUESTION = "Сколько будет 7 × 8?"
+OPERATOR_ACTIONS = {
+    "correct": "Ответ верный",
+    "hint": "Подсказка",
+    "retry": "Попробуй ещё раз",
+    "explain": "Объяснить",
+    "finish": "Завершить урок",
+}
 
 
 @contextmanager
@@ -60,12 +71,18 @@ def remove_expired_sessions() -> None:
 
 
 class Submission(BaseModel):
-    client_nickname: str = Field(min_length=1, max_length=100)
-    new_identifier: str = Field(min_length=1, max_length=200)
-    current_date: str = Field(min_length=1, max_length=100)
-    favorite_number: int = Field(ge=0, le=999_999_999)
+    answer: str = Field(min_length=1, max_length=200)
 
-    @field_validator("client_nickname", "new_identifier", "current_date", mode="before")
+    @field_validator("answer", mode="before")
+    @classmethod
+    def trim_text(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+
+class AnswerUpdate(BaseModel):
+    answer: str = Field(min_length=1, max_length=200)
+
+    @field_validator("answer", mode="before")
     @classmethod
     def trim_text(cls, value: str) -> str:
         return value.strip() if isinstance(value, str) else value
@@ -73,7 +90,8 @@ class Submission(BaseModel):
 
 class OperatorAction(BaseModel):
     session_id: str
-    action: Literal["comment_demo", "push_demo", "success", "error"]
+    action: Literal["correct", "hint", "retry", "explain", "finish"]
+    answer_version: int = Field(ge=1)
     user_id: int = Field(gt=0)
     chat_id: int = Field(gt=0)
 
@@ -174,60 +192,53 @@ async def register_operator(
 async def create_submission(submission: Submission) -> dict[str, str]:
     require_configuration()
     remove_expired_sessions()
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = Session()
+    await notify_operators(session_id, submission.answer, 1)
+
+    return {"session_id": session_id}
+
+
+async def notify_operators(
+    session_id: str, answer: str, answer_version: int
+) -> None:
     operator_chat_ids = get_operator_chat_ids()
     if not operator_chat_ids:
+        if answer_version == 1:
+            sessions.pop(session_id, None)
         raise HTTPException(
             status_code=503,
             detail=(
-                "Пока нет зарегистрированных операторов. Сначала каждый "
-                "оператор должен открыть бота и отправить ему /start."
+                "Пока нет репетиторов в боте. Откройте Telegram-бота и "
+                "нажмите Start, чтобы зарегистрироваться."
             ),
         )
 
-    session_id = str(uuid.uuid4())
-    sessions[session_id] = Session()
-    failure_detail = "Не удалось передать заявку оператору. Попробуйте позже."
+    session = sessions[session_id]
     message = (
-        "📬 Поступила новая анкета!\n"
-        f"🆔 ID Сессии: {session_id}\n\n"
-        f"👤 Ник: {submission.client_nickname}\n"
-        f"🔑 Новый идентификатор: {submission.new_identifier}\n"
-        f"📅 Дата сегодня: {submission.current_date}\n"
-        f"🔢 Любимое число: {submission.favorite_number}\n\n"
-        "Выберите, какой следующий экран отобразить пользователю на сайте:"
+        "📚 Новое задание для проверки\n"
+        f"🆔 Урок: {session_id}\n"
+        f"📝 Задание: {QUESTION}\n"
+        f"🔁 Ответ №{answer_version}: {answer}\n\n"
+        "Выберите обратную связь для ученика:"
     )
     keyboard = {
         "inline_keyboard": [
             [
                 {
-                    "text": "Комментарий",
-                    "callback_data": f"op_screen:comment_demo:{session_id}",
+                    "text": label,
+                    "callback_data": (
+                        f"tutor:{action}:{session_id}:{answer_version}"
+                    ),
                 }
-            ],
-            [
-                {
-                    "text": "Пуш",
-                    "callback_data": f"op_screen:push_demo:{session_id}",
-                }
-            ],
-            [
-                {
-                    "text": "Ошибка",
-                    "callback_data": f"op_screen:error:{session_id}",
-                }
-            ],
-            [
-                {
-                    "text": "Успешно",
-                    "callback_data": f"op_screen:success:{session_id}",
-                }
-            ],
+            ]
+            for action, label in OPERATOR_ACTIONS.items()
         ]
     }
 
+    delivered = 0
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            delivered = 0
             for chat_id in operator_chat_ids:
                 response = await client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -255,37 +266,45 @@ async def create_submission(submission: Submission) -> dict[str, str]:
                     else "invalid response"
                 )
                 logger.warning(
-                    "Telegram rejected delivery to a registered operator: "
-                    "HTTP %s, error_code=%s, description=%s",
+                    "Telegram rejected tutor notification: HTTP %s, "
+                    "error_code=%s, description=%s",
                     response.status_code,
                     telegram_response.get("error_code", "unknown")
                     if isinstance(telegram_response, dict)
                     else "unknown",
                     description,
                 )
-
-        if delivered == 0:
-            sessions.pop(session_id, None)
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Telegram не доставил заявку ни одному оператору. "
-                    "Попросите операторов открыть бота и отправить /start."
-                ),
-            )
     except httpx.HTTPError as error:
-        sessions.pop(session_id, None)
         logger.warning(
-            "Could not reach Telegram for session %s (%s)",
+            "Could not notify tutors for lesson %s (%s)",
             session_id,
             type(error).__name__,
         )
+
+    if delivered == 0:
+        if answer_version == 1:
+            sessions.pop(session_id, None)
         raise HTTPException(
             status_code=502,
-            detail=failure_detail,
+            detail="Не удалось отправить ответ репетитору. Попробуйте ещё раз.",
         )
 
-    return {"session_id": session_id}
+
+@app.post("/api/sessions/{session_id}/answers", status_code=202)
+async def submit_follow_up_answer(
+    session_id: str, submission: AnswerUpdate
+) -> dict[str, int]:
+    remove_expired_sessions()
+    session = sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Урок не найден.")
+    if session.finalized:
+        raise HTTPException(status_code=409, detail="Урок уже завершён.")
+
+    session.answer_version += 1
+    session.latest_event = None
+    await notify_operators(session_id, submission.answer, session.answer_version)
+    return {"answer_version": session.answer_version}
 
 
 @app.post("/api/operator/action")
@@ -301,15 +320,31 @@ async def operator_action(
     session = sessions.get(payload.session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.action is not None:
-        raise HTTPException(status_code=409, detail="Session already has a decision")
+    if session.finalized:
+        raise HTTPException(status_code=409, detail="Lesson already finished")
+    if payload.answer_version != session.answer_version:
+        raise HTTPException(status_code=409, detail="A newer answer is awaiting review")
+    if session.reviewed_version == payload.answer_version:
+        raise HTTPException(status_code=409, detail="This answer was already reviewed")
 
-    session.action = payload.action
+    session.reviewed_version = payload.answer_version
+    feedback = {
+        "correct": "Верно! 7 × 8 = 56.",
+        "hint": "Подсказка: представь 7 групп по 8 предметов.",
+        "retry": "Попробуй ещё раз — ты справишься.",
+        "explain": "7 × 8 — это 7 + 7 + 7 + 7 + 7 + 7 + 7 + 7 = 56.",
+        "finish": "Урок завершён. Спасибо за работу!",
+    }
+    session.latest_event = {
+        "action": "change_screen",
+        "target": payload.action,
+        "feedback": feedback[payload.action],
+    }
+    if payload.action in {"correct", "finish"}:
+        session.finalized = True
     if session.websocket is not None:
         try:
-            await session.websocket.send_json(
-                {"action": "change_screen", "target": payload.action}
-            )
+            await session.websocket.send_json(session.latest_event)
         except (RuntimeError, WebSocketDisconnect):
             logger.info("WebSocket closed before decision delivery for %s", payload.session_id)
             session.websocket = None
@@ -327,10 +362,8 @@ async def session_websocket(websocket: WebSocket, session_id: str) -> None:
 
     await websocket.accept()
     session.websocket = websocket
-    if session.action is not None:
-        await websocket.send_json(
-            {"action": "change_screen", "target": session.action}
-        )
+    if session.latest_event is not None:
+        await websocket.send_json(session.latest_event)
 
     try:
         while True:
