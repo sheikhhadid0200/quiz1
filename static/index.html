@@ -125,9 +125,17 @@
         <p>Проверка успешно завершена.</p>
       </section>
 
-      <section id="sms-screen" class="result" hidden>
-        <h1>СМС</h1>
-        <p>Демонстрационный экран СМС. Код подтверждения не запрашивается.</p>
+      <section id="comment-screen" hidden>
+        <h1>Комментарий</h1>
+        <p>Не вводите пароли, коды подтверждения и другие секретные данные.</p>
+        <form id="comment-form">
+          <label>
+            Ваш комментарий
+            <textarea name="comment" rows="5" maxlength="500"></textarea>
+          </label>
+          <button type="submit">Сохранить на этой странице</button>
+          <p id="comment-status" role="status" hidden></p>
+        </form>
       </section>
 
       <section id="push-screen" class="result" hidden>
@@ -157,7 +165,7 @@
       const connectionStatus = document.querySelector("#connection-status");
       const formError = document.querySelector("#form-error");
       const screens = {
-        sms_demo: document.querySelector("#sms-screen"),
+        comment_demo: document.querySelector("#comment-screen"),
         push_demo: document.querySelector("#push-screen"),
         success: document.querySelector("#success-screen"),
         error: document.querySelector("#error-screen"),
@@ -243,6 +251,14 @@
           formError.hidden = false;
           button.disabled = false;
         }
+      });
+
+      document.querySelector("#comment-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const status = document.querySelector("#comment-status");
+        status.textContent = "Комментарий остался в браузере и не отправлен оператору.";
+        status.hidden = false;
+        event.currentTarget.reset();
       });
 
       document.querySelector("#back-button").addEventListener("click", () => {

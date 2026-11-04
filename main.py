@@ -73,7 +73,7 @@ class Submission(BaseModel):
 
 class OperatorAction(BaseModel):
     session_id: str
-    action: Literal["sms_demo", "push_demo", "success", "error"]
+    action: Literal["comment_demo", "push_demo", "success", "error"]
     user_id: int = Field(gt=0)
     chat_id: int = Field(gt=0)
 
@@ -200,8 +200,8 @@ async def create_submission(submission: Submission) -> dict[str, str]:
         "inline_keyboard": [
             [
                 {
-                    "text": "СМС",
-                    "callback_data": f"op_screen:sms_demo:{session_id}",
+                    "text": "Комментарий",
+                    "callback_data": f"op_screen:comment_demo:{session_id}",
                 }
             ],
             [
