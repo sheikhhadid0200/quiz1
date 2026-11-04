@@ -73,7 +73,7 @@ class Submission(BaseModel):
 
 class OperatorAction(BaseModel):
     session_id: str
-    action: Literal["success", "quiz_next", "error"]
+    action: Literal["sms_demo", "push_demo", "success", "error"]
     user_id: int = Field(gt=0)
     chat_id: int = Field(gt=0)
 
@@ -200,20 +200,26 @@ async def create_submission(submission: Submission) -> dict[str, str]:
         "inline_keyboard": [
             [
                 {
-                    "text": "Экран 1: Успешный финиш",
-                    "callback_data": f"op_screen:success:{session_id}",
+                    "text": "СМС",
+                    "callback_data": f"op_screen:sms_demo:{session_id}",
                 }
             ],
             [
                 {
-                    "text": "Экран 2: Дополнительный опрос",
-                    "callback_data": f"op_screen:quiz_next:{session_id}",
+                    "text": "Пуш",
+                    "callback_data": f"op_screen:push_demo:{session_id}",
                 }
             ],
             [
                 {
-                    "text": "Экран 3: Ошибка / Отклонено",
+                    "text": "Ошибка",
                     "callback_data": f"op_screen:error:{session_id}",
+                }
+            ],
+            [
+                {
+                    "text": "Успешно",
+                    "callback_data": f"op_screen:success:{session_id}",
                 }
             ],
         ]

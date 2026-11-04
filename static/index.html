@@ -125,9 +125,14 @@
         <p>Проверка успешно завершена.</p>
       </section>
 
-      <section id="quiz-screen" class="result" hidden>
-        <h1>Дополнительный опрос</h1>
-        <p>Вопросы для дополнительного опроса будут добавлены позже.</p>
+      <section id="sms-screen" class="result" hidden>
+        <h1>СМС</h1>
+        <p>Демонстрационный экран СМС. Код подтверждения не запрашивается.</p>
+      </section>
+
+      <section id="push-screen" class="result" hidden>
+        <h1>Пуш</h1>
+        <p>Демонстрационный экран push-уведомления. Запрос подтверждения не отправляется.</p>
       </section>
 
       <section id="error-screen" class="result" hidden>
@@ -152,8 +157,9 @@
       const connectionStatus = document.querySelector("#connection-status");
       const formError = document.querySelector("#form-error");
       const screens = {
+        sms_demo: document.querySelector("#sms-screen"),
+        push_demo: document.querySelector("#push-screen"),
         success: document.querySelector("#success-screen"),
-        quiz_next: document.querySelector("#quiz-screen"),
         error: document.querySelector("#error-screen"),
       };
       let socket;

@@ -73,7 +73,7 @@ async def choose_screen(callback: CallbackQuery) -> None:
     except ValueError:
         await callback.answer("Некорректное действие.", show_alert=True)
         return
-    if action not in {"success", "quiz_next", "error"}:
+    if action not in {"sms_demo", "push_demo", "error", "success"}:
         await callback.answer("Неизвестный экран.", show_alert=True)
         return
 
