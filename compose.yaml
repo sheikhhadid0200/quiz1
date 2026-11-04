@@ -8,6 +8,15 @@ x-app: &app
 services:
   backend:
     <<: *app
+    command:
+      - python
+      - -m
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     environment:
       PORT: "8000"
       DATA_DIR: /data

@@ -31,22 +31,31 @@ app = FastAPI(title="Operator Review")
 
 @dataclass
 class Session:
+    student_name: str
+    stream_number: int
+    course_number: int
+    class_number: int
+    stage: str = "awaiting_assignment"
     websocket: WebSocket | None = None
     created_at: float = field(default_factory=time.monotonic)
-    answer_version: int = 1
+    answer_version: int = 0
     reviewed_version: int = 0
+    awaiting_answer: bool = False
     finalized: bool = False
     latest_event: dict[str, str] | None = None
 
 
 sessions: dict[str, Session] = {}
-QUESTION = "Сколько будет 7 × 8?"
-OPERATOR_ACTIONS = {
-    "correct": "Ответ верный",
-    "hint": "Подсказка",
-    "retry": "Попробуй ещё раз",
-    "explain": "Объяснить",
-    "finish": "Завершить урок",
+TASK_PROMPT = "Сколько будет 6 × 6?"
+QUESTION_PROMPT = "2 + 2 = 4?"
+ASSIGNMENT_ACTIONS = {
+    "send_task": "Отправить задачу",
+    "send_question": "Отправить вопрос",
+    "error": "Ошибка, проверьте данные",
+}
+ANSWER_ACTIONS = {
+    "correct": "Верно",
+    "incorrect": "Не верно, попробуйте ещё",
 }
 
 
@@ -70,17 +79,23 @@ def remove_expired_sessions() -> None:
             sessions.pop(session_id, None)
 
 
-class Submission(BaseModel):
-    answer: str = Field(min_length=1, max_length=200)
+class StudentProfile(BaseModel):
+    student_name: str = Field(min_length=1)
+    stream_number: str = Field(min_length=1)
+    course_number: str = Field(min_length=1)
+    class_number: str = Field(min_length=1)
 
-    @field_validator("answer", mode="before")
+    @field_validator(
+        "student_name", "stream_number", "course_number", "class_number",
+        mode="before",
+    )
     @classmethod
     def trim_text(cls, value: str) -> str:
         return value.strip() if isinstance(value, str) else value
 
 
 class AnswerUpdate(BaseModel):
-    answer: str = Field(min_length=1, max_length=200)
+    answer: str = Field(min_length=1)
 
     @field_validator("answer", mode="before")
     @classmethod
@@ -90,8 +105,8 @@ class AnswerUpdate(BaseModel):
 
 class OperatorAction(BaseModel):
     session_id: str
-    action: Literal["correct", "hint", "retry", "explain", "finish"]
-    answer_version: int = Field(ge=1)
+    action: Literal["send_task", "send_question", "error", "correct", "incorrect"]
+    answer_version: int = Field(ge=0)
     user_id: int = Field(gt=0)
     chat_id: int = Field(gt=0)
 
@@ -189,23 +204,44 @@ async def register_operator(
 
 
 @app.post("/api/submissions", status_code=201)
-async def create_submission(submission: Submission) -> dict[str, str]:
+async def create_submission(profile: StudentProfile) -> dict[str, str]:
     require_configuration()
     remove_expired_sessions()
     session_id = str(uuid.uuid4())
-    sessions[session_id] = Session()
-    await notify_operators(session_id, submission.answer, 1)
+    sessions[session_id] = Session(
+        student_name=profile.student_name,
+        stream_number=profile.stream_number,
+        course_number=profile.course_number,
+        class_number=profile.class_number,
+    )
+    message = (
+        "📚 Новый ученик ожидает задание\n"
+        f"🆔 Урок: {session_id}\n"
+        f"👤 Ученик: {profile.student_name}\n"
+        f"📚 Поток: {profile.stream_number}\n"
+        f"🎓 Курс: {profile.course_number}\n"
+        f"🏫 Класс: {profile.class_number}\n\n"
+        "Выберите, что отправить ученику:"
+    )
+    try:
+        await notify_operators(
+            session_id, message, ASSIGNMENT_ACTIONS, answer_version=0
+        )
+    except HTTPException:
+        sessions.pop(session_id, None)
+        raise
 
     return {"session_id": session_id}
 
 
 async def notify_operators(
-    session_id: str, answer: str, answer_version: int
+    session_id: str,
+    message: str,
+    actions: dict[str, str],
+    answer_version: int,
 ) -> None:
     operator_chat_ids = get_operator_chat_ids()
     if not operator_chat_ids:
-        if answer_version == 1:
-            sessions.pop(session_id, None)
         raise HTTPException(
             status_code=503,
             detail=(
@@ -214,14 +250,6 @@ async def notify_operators(
             ),
         )
 
-    session = sessions[session_id]
-    message = (
-        "📚 Новое задание для проверки\n"
-        f"🆔 Урок: {session_id}\n"
-        f"📝 Задание: {QUESTION}\n"
-        f"🔁 Ответ №{answer_version}: {answer}\n\n"
-        "Выберите обратную связь для ученика:"
-    )
     keyboard = {
         "inline_keyboard": [
             [
@@ -232,7 +260,7 @@ async def notify_operators(
                     ),
                 }
             ]
-            for action, label in OPERATOR_ACTIONS.items()
+            for action, label in actions.items()
         ]
     }
 
@@ -282,8 +310,6 @@ async def notify_operators(
         )
 
     if delivered == 0:
-        if answer_version == 1:
-            sessions.pop(session_id, None)
         raise HTTPException(
             status_code=502,
             detail="Не удалось отправить ответ репетитору. Попробуйте ещё раз.",
@@ -300,10 +326,37 @@ async def submit_follow_up_answer(
         raise HTTPException(status_code=404, detail="Урок не найден.")
     if session.finalized:
         raise HTTPException(status_code=409, detail="Урок уже завершён.")
+    if session.stage not in {"task", "question"} or not session.awaiting_answer:
+        raise HTTPException(
+            status_code=409, detail="Сейчас нельзя отправить ответ."
+        )
 
+    previous_version = session.answer_version
+    previous_event = session.latest_event
+    session.awaiting_answer = False
     session.answer_version += 1
     session.latest_event = None
-    await notify_operators(session_id, submission.answer, session.answer_version)
+    prompt = TASK_PROMPT if session.stage == "task" else QUESTION_PROMPT
+    message = (
+        "📝 Ответ ученика\n"
+        f"🆔 Урок: {session_id}\n"
+        f"👤 Ученик: {session.student_name}\n"
+        f"📚 Поток: {session.stream_number}\n"
+        f"🎓 Курс: {session.course_number}\n"
+        f"🏫 Класс: {session.class_number}\n"
+        f"📖 {prompt}\n"
+        f"✍️ Ответ №{session.answer_version}: {submission.answer}\n\n"
+        "Проверьте ответ:"
+    )
+    try:
+        await notify_operators(
+            session_id, message, ANSWER_ACTIONS, session.answer_version
+        )
+    except HTTPException:
+        session.answer_version = previous_version
+        session.awaiting_answer = True
+        session.latest_event = previous_event
+        raise
     return {"answer_version": session.answer_version}
 
 
@@ -322,34 +375,67 @@ async def operator_action(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.finalized:
         raise HTTPException(status_code=409, detail="Lesson already finished")
+
+    if payload.action in {"send_task", "send_question", "error"}:
+        if payload.answer_version != 0 or session.stage != "awaiting_assignment":
+            raise HTTPException(status_code=409, detail="Assignment already selected")
+        if payload.action == "error":
+            session.stage = "error"
+            session.finalized = True
+            session.latest_event = {
+                "action": "change_screen",
+                "target": "error",
+                "feedback": "Ошибка, проверьте данные и попробуйте снова.",
+            }
+        else:
+            session.stage = "task" if payload.action == "send_task" else "question"
+            session.awaiting_answer = True
+            session.latest_event = {
+                "action": "change_screen",
+                "target": session.stage,
+                "prompt": TASK_PROMPT if session.stage == "task" else QUESTION_PROMPT,
+            }
+        if session.websocket is not None:
+            await send_session_event(session, payload.session_id)
+        return {"status": "ok"}
+
     if payload.answer_version != session.answer_version:
         raise HTTPException(status_code=409, detail="A newer answer is awaiting review")
     if session.reviewed_version == payload.answer_version:
         raise HTTPException(status_code=409, detail="This answer was already reviewed")
+    if session.answer_version == 0 or session.awaiting_answer:
+        raise HTTPException(status_code=409, detail="No answer is awaiting review")
 
     session.reviewed_version = payload.answer_version
-    feedback = {
-        "correct": "Верно! 7 × 8 = 56.",
-        "hint": "Подсказка: представь 7 групп по 8 предметов.",
-        "retry": "Попробуй ещё раз — ты справишься.",
-        "explain": "7 × 8 — это 7 + 7 + 7 + 7 + 7 + 7 + 7 + 7 = 56.",
-        "finish": "Урок завершён. Спасибо за работу!",
-    }
+    if payload.action == "incorrect":
+        session.awaiting_answer = True
+        feedback = "Не верно, попробуйте ещё."
+        target = "incorrect"
+    else:
+        session.finalized = True
+        feedback = "Верно! Спасибо за ответ."
+        target = "correct"
     session.latest_event = {
         "action": "change_screen",
-        "target": payload.action,
-        "feedback": feedback[payload.action],
+        "target": target,
+        "stage": session.stage,
+        "prompt": TASK_PROMPT if session.stage == "task" else QUESTION_PROMPT,
+        "feedback": feedback,
     }
-    if payload.action in {"correct", "finish"}:
-        session.finalized = True
     if session.websocket is not None:
-        try:
-            await session.websocket.send_json(session.latest_event)
-        except (RuntimeError, WebSocketDisconnect):
-            logger.info("WebSocket closed before decision delivery for %s", payload.session_id)
-            session.websocket = None
+        await send_session_event(session, payload.session_id)
 
     return {"status": "ok"}
+
+
+async def send_session_event(session: Session, session_id: str) -> None:
+    if session.websocket is None or session.latest_event is None:
+        return
+    try:
+        await session.websocket.send_json(session.latest_event)
+    except (RuntimeError, WebSocketDisconnect):
+        logger.info("WebSocket closed before decision delivery for %s", session_id)
+        session.websocket = None
 
 
 @app.websocket("/ws/{session_id}")

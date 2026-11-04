@@ -76,8 +76,14 @@ async def send_tutor_feedback(callback: CallbackQuery) -> None:
     except (ValueError, TypeError):
         await callback.answer("Некорректное действие.", show_alert=True)
         return
-    if action not in {"correct", "hint", "retry", "explain", "finish"}:
-        await callback.answer("Неизвестный экран.", show_alert=True)
+    if action not in {
+        "send_task",
+        "send_question",
+        "error",
+        "correct",
+        "incorrect",
+    }:
+        await callback.answer("Неизвестное действие.", show_alert=True)
         return
 
     try:
@@ -104,7 +110,7 @@ async def send_tutor_feedback(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось обновить страницу клиента.", show_alert=True)
         return
 
-    await callback.answer("Обратная связь отправлена ученику.")
+    await callback.answer("Действие отправлено.")
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
 
