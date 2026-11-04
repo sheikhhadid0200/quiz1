@@ -5,8 +5,9 @@ from pathlib import Path
 
 import httpx
 from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
 from dotenv import load_dotenv
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +28,14 @@ if not BOT_TOKEN or not OPERATOR_CHAT_ID or not OPERATOR_CALLBACK_SECRET:
 
 bot = Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher()
+
+
+@dispatcher.message(CommandStart())
+async def show_chat_id(message: Message) -> None:
+    await message.answer(
+        f"ID этого чата: {message.chat.id}\n"
+        "Укажите это значение в OPERATOR_CHAT_ID на сервере."
+    )
 
 
 @dispatcher.callback_query(F.data.startswith("op_screen:"))

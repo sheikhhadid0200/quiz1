@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
@@ -92,6 +93,7 @@ async def create_submission(submission: Submission) -> dict[str, str]:
     remove_expired_sessions()
     session_id = str(uuid.uuid4())
     sessions[session_id] = Session()
+    failure_detail = "Не удалось передать заявку оператору. Попробуйте позже."
     message = (
         "📬 Поступила новая анкета!\n"
         f"🆔 ID Сессии: {session_id}\n\n"
@@ -155,6 +157,17 @@ async def create_submission(submission: Submission) -> dict[str, str]:
                     telegram_response.get("error_code", "unknown"),
                     description,
                 )
+                if (
+                    response.status_code == 403
+                    and isinstance(description, str)
+                    and "can't send messages to the bot" in description.lower()
+                ):
+                    failure_detail = (
+                        "Указан неверный чат оператора: бот не может отправить "
+                        "сообщение другому боту. Напишите этому боту команду "
+                        "/start в личном чате и укажите ID своего чата в "
+                        "OPERATOR_CHAT_ID."
+                    )
                 raise RuntimeError("Telegram rejected the message")
     except httpx.HTTPError as error:
         sessions.pop(session_id, None)
@@ -165,13 +178,13 @@ async def create_submission(submission: Submission) -> dict[str, str]:
         )
         raise HTTPException(
             status_code=502,
-            detail="Не удалось передать заявку оператору. Попробуйте позже.",
+            detail=failure_detail,
         )
     except RuntimeError:
         sessions.pop(session_id, None)
         raise HTTPException(
             status_code=502,
-            detail="Не удалось передать заявку оператору. Попробуйте позже.",
+            detail=failure_detail,
         )
 
     return {"session_id": session_id}
