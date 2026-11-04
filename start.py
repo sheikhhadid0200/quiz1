@@ -30,7 +30,7 @@ async def stop_processes(processes: list[asyncio.subprocess.Process]) -> None:
 
 
 async def main() -> None:
-    port = os.getenv("PORT", "8000")
+    port = os.getenv("PORT", "80")
     processes: list[asyncio.subprocess.Process] = []
     stop_requested = asyncio.Event()
     loop = asyncio.get_running_loop()

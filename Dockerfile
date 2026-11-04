@@ -12,6 +12,6 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY main.py bot.py start.py ./
 COPY static ./static
 
-EXPOSE 8000
+EXPOSE 80
 
 CMD ["python", "start.py"]
